@@ -1,0 +1,85 @@
+program: uot_superpixels.py
+method: bayes
+metric:
+  name: avg_accuracy_pct
+  goal: maximize
+entity: leathead_AQ_AM_IO
+project: MET
+
+parameters:
+  # ---- fixed ----------------------------------------------------------------
+  dataset:
+    value: tieredImageNet
+  backbone:
+    value: vits16
+  n_way:
+    value: 5
+  n_shot:
+    value: 5
+  n_query:
+    value: 10
+  n_test_tasks:
+    value: 300
+  use_specific_trans:
+    value: "true"
+  calibrate:
+    value: "true"
+  transductive:
+    value: sinkhorn
+  met_iterations:
+    value: 200
+  use_wandb:
+    value: "true"
+  wandb_project:
+    value: MET
+  wandb_entity:
+    value: leathead_AQ_AM_IO
+  note:
+    value: sweep_tieredImageNet_val
+
+  # ---- core OT hparams (always active) -------------------------------------
+  reg_eps:
+    distribution: log_uniform_values
+    min: 0.005
+    max: 0.2
+  reg_mass:
+    distribution: uniform
+    min: 0.05
+    max: 0.95
+  alpha_global:
+    distribution: uniform
+    min: 0.0
+    max: 0.8
+
+  # ---- solver choice --------------------------------------------------------
+  transport_solver:
+    values: [uot, met_dykstra, met_dustbin]
+
+  # ---- MET Dykstra hparam (ignored by uot / met_dustbin) -------------------
+  met_mass_fraction:
+    distribution: uniform
+    min: 0.3
+    max: 0.9
+
+  # ---- MET dustbin hparam (ignored by uot / met_dykstra) -------------------
+  met_dustbin_cost:
+    distribution: uniform
+    min: 0.1
+    max: 1.2
+
+  # ---- superpixel toggle + hparams -----------------------------------------
+  use_superpixels:
+    values: ["true", "false"]
+  spix_n_segments:
+    distribution: int_uniform
+    min: 20
+    max: 160
+  spix_gamma:
+    distribution: uniform
+    min: 0.2
+    max: 0.9
+
+command:
+  - /home/ahmedm04/projects/DINOSEG/.venv/bin/python
+  - ${program}
+  - ${args}

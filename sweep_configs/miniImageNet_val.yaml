@@ -1,0 +1,67 @@
+program: uot_superpixels.py
+method: bayes
+metric:
+  name: avg_accuracy_pct
+  goal: maximize
+entity: leathead_AQ_AM_IO
+project: MET
+
+parameters:
+  # ---- fixed ----------------------------------------------------------------
+  dataset:
+    value: miniImageNet
+  backbone:
+    value: vits16
+  n_way:
+    value: 5
+  n_shot:
+    value: 5
+  n_query:
+    value: 10
+  n_test_tasks:
+    value: 300
+  use_specific_trans:
+    value: "true"
+  calibrate:
+    value: "true"
+  transductive:
+    value: sinkhorn
+  met_iterations:
+    value: 200
+  transport_solver:
+    value: met_dykstra
+  use_wandb:
+    value: "true"
+  wandb_project:
+    value: MET
+  wandb_entity:
+    value: leathead_AQ_AM_IO
+  mini_imagenet_root:
+    value: /home_old/ahmedm04/mini-imagenet-tools/mini_imagenet_split/val
+  note:
+    value: sweep_miniImageNet_val
+
+  # ---- core OT hparams -----------------------------------------------------
+  reg_eps:
+    values: [0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.1]
+  reg_mass:
+    values: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+  alpha_global:
+    values: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
+
+  # ---- MET Dykstra hparam --------------------------------------------------
+  met_mass_fraction:
+    values: [0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+
+  # ---- superpixel toggle + hparams -----------------------------------------
+  use_superpixels:
+    values: ["true", "false"]
+  spix_n_segments:
+    values: [40, 60, 80, 100, 120, 140, 160, 180, 200, 220, 240, 260, 280, 300]
+  spix_gamma:
+    values: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+
+command:
+  - /home/ahmedm04/projects/DINOSEG/.venv/bin/python
+  - ${program}
+  - ${args}
