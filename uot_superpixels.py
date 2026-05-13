@@ -89,7 +89,12 @@ import dino.vision_transformer as vits
 from ot.unbalanced import sinkhorn_unbalanced  # returns transport plan Γ
 from ot.bregman import sinkhorn               # used for optional query-class capacity calibration
 from utils.wandb import WandbLogger
-from met_solver import met_average_cost, met_dustbin_sinkhorn, met_dykstra_projection
+from met_solver import (
+    met_average_cost,
+    met_dustbin_sinkhorn,
+    met_dykstra_projection,
+    met_dykstra_projection_corrected,
+)
 
 DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
 SEED = 42  # Constant seed for reproducibility
@@ -383,8 +388,12 @@ class OTNet(FewShotClassifier):
         self.reg_mass = float(reg_mass)      # mass KL penalty (unbalancedness)
         self.alpha_global = float(alpha_global)
         self.transport_solver = str(transport_solver).lower()
-        if self.transport_solver not in {"uot", "met_dykstra", "met_dustbin"}:
-            raise ValueError("transport_solver must be one of: uot, met_dykstra, met_dustbin")
+        valid_transport_solvers = {"uot", "met_dykstra", "met_dykstra_corrected", "met_dustbin"}
+        if self.transport_solver not in valid_transport_solvers:
+            raise ValueError(
+                "transport_solver must be one of: uot, met_dykstra, "
+                "met_dykstra_corrected, met_dustbin"
+            )
         self.met_mass_fraction = float(met_mass_fraction)
         self.met_dustbin_cost = float(met_dustbin_cost)
         self.met_iterations = int(met_iterations)
@@ -817,6 +826,16 @@ class OTNet(FewShotClassifier):
                         num_iter=int(self.met_iterations),
                     ).to(DEVICE, dtype=torch.float32)
                     cost = met_average_cost(M, Gamma_t)
+                elif self.transport_solver == "met_dykstra_corrected":
+                    Gamma_t = met_dykstra_projection_corrected(
+                        M,
+                        a_q,
+                        b_c,
+                        epsilon=float(self.reg_eps),
+                        mass_fraction=float(self.met_mass_fraction),
+                        num_iter=int(self.met_iterations),
+                    ).to(DEVICE, dtype=torch.float32)
+                    cost = met_average_cost(M, Gamma_t)
                 else:
                     Gamma_t = met_dustbin_sinkhorn(
                         M,
@@ -1130,8 +1149,11 @@ def main():
         '--transport_solver',
         type=str,
         default='uot',
-        choices=['uot', 'met_dykstra', 'met_dustbin'],
-        help="Patch transport solver: legacy UOT, MET capacity projections, or MET dustbin fallback.",
+        choices=['uot', 'met_dykstra', 'met_dykstra_corrected', 'met_dustbin'],
+        help=(
+            "Patch transport solver: legacy UOT, MET capacity projections, "
+            "corrected KL-Dykstra MET, or MET dustbin fallback."
+        ),
     )
     parser.add_argument('--met_mass_fraction', type=float, default=0.6, help="Target evidence mass fraction for MET Dykstra.")
     parser.add_argument('--met_dustbin_cost', type=float, default=0.5, help="Rejection cost for MET dustbin solver.")
