@@ -1,0 +1,85 @@
+program: uot_superpixels_ft.py
+method: grid
+metric:
+  name: avg_accuracy_pct
+  goal: maximize
+entity: leathead_AQ_AM_IO
+project: MET
+
+parameters:
+  # ---- swept axes ----------------------------------------------------------
+  dataset:
+    values:
+      - ChestX
+      - ISIC
+      - EUROSAT
+      - Plant-Disease
+      - BCCD_WBC
+      - HEp
+      - CUB
+      - miniImageNet
+      - tieredImageNet
+      - Meta-CIFAR10
+      - Meta-CIFAR100
+      - Meta-MNIST
+      - Meta-TrafficSign
+      - Meta-Omniglot
+      - Meta-MSCOCO
+  n_shot:
+    values: [1, 5]
+
+  # ---- locked hparams ------------------------------------------------------
+  n_way:
+    value: 5
+  backbone:
+    value: vits16
+  n_query:
+    value: 10
+  n_test_tasks:
+    value: 1000
+  n_workers:
+    value: 8
+  use_specific_trans:
+    value: "true"
+  transport_solver:
+    value: met_dykstra_corrected
+  reg_eps:
+    value: 0.01
+  reg_mass:
+    value: 0.4
+  alpha_global:
+    value: 0.6
+  met_mass_fraction:
+    value: 0.7
+  met_iterations:
+    value: 200
+  calibrate:
+    value: "true"
+  transductive:
+    value: sinkhorn
+  use_superpixels:
+    value: "false"
+  use_wandb:
+    value: "true"
+  wandb_project:
+    value: MET
+  wandb_entity:
+    value: leathead_AQ_AM_IO
+
+  # ---- dataset path overrides (match the existing per-dataset sweeps) ------
+  mini_imagenet_root:
+    value: /home_old/ahmedm04/few_shot_ds/mini-imagenet-tools/mini_imagenet_split/val
+  tiered_imagenet_root:
+    value: /home_old/ahmedm04/few_shot_ds/tiered-imagenet-tools/tiered_imagenet/val
+  meta_dataset_root:
+    value: /home/ahmedm04/projects/MET/meta-dataset
+  meta_records_root:
+    value: /home_old/ahmedm04/few_shot_ds/meta-dataset/processed_data
+
+  note:
+    value: fixed_hparam_all_datasets
+
+command:
+  - /home/ahmedm04/projects/DINOSEG/.venv/bin/python
+  - ${program}
+  - ${args}

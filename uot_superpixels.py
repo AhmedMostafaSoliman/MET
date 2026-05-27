@@ -57,6 +57,7 @@ from datetime import datetime
 import os
 import math
 import argparse
+import json
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
@@ -94,6 +95,14 @@ from met_solver import (
     met_dustbin_sinkhorn,
     met_dykstra_projection,
     met_dykstra_projection_corrected,
+)
+from meta_dataset_eval import (
+    DEFAULT_META_DATASET_CODE_ROOT,
+    DEFAULT_META_DATASET_RECORDS_ROOT,
+    META_DATASET_TEST_TYPES,
+    canonicalize_meta_dataset_name,
+    evaluate_meta_dataset_episodes,
+    is_meta_dataset_name as is_official_meta_dataset_name,
 )
 
 DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
@@ -170,6 +179,189 @@ class MyDataSet(data.Dataset):
         if self.transform is not None:
             image = self.transform(image)
         return image, target
+
+    def __len__(self):
+        return len(self.data)
+
+
+META_DATASET_DEFAULT_ROOT = "/home_old/ahmedm04/few_shot_ds/meta-dataset"
+META_IMAGE_EXTENSIONS = {".bmp", ".jpeg", ".jpg", ".png", ".ppm"}
+
+
+def _meta_dataset_key(name: str) -> Optional[str]:
+    normalized = "".join(ch for ch in str(name).lower() if ch.isalnum())
+    aliases = {
+        "metacifar10": "cifar10",
+        "metadatasetcifar10": "cifar10",
+        "cifar10": "cifar10",
+        "metacifar100": "cifar100",
+        "metadatasetcifar100": "cifar100",
+        "cifar100": "cifar100",
+        "metamnist": "mnist",
+        "metadatasetmnist": "mnist",
+        "mnist": "mnist",
+        "metatrafficsign": "traffic_sign",
+        "metatrafficsigns": "traffic_sign",
+        "metagtsrb": "traffic_sign",
+        "metadatasettrafficsign": "traffic_sign",
+        "trafficsign": "traffic_sign",
+        "trafficsigns": "traffic_sign",
+        "gtsrb": "traffic_sign",
+        "metaomniglot": "omniglot",
+        "metadatasetomniglot": "omniglot",
+        "omniglot": "omniglot",
+        "metamscoco": "mscoco",
+        "metacoco": "mscoco",
+        "metadatasetmscoco": "mscoco",
+        "mscoco": "mscoco",
+        "coco": "mscoco",
+    }
+    return aliases.get(normalized)
+
+
+def _is_meta_dataset(name: str) -> bool:
+    return is_official_meta_dataset_name(name)
+
+
+def _dataset_transform_key(name: str) -> str:
+    return "Meta-Dataset" if _is_meta_dataset(name) else name
+
+
+def _iter_image_files(root: str) -> List[str]:
+    paths = []
+    for current_root, _, files in os.walk(root):
+        for filename in sorted(files):
+            if os.path.splitext(filename)[1].lower() in META_IMAGE_EXTENSIONS:
+                paths.append(os.path.join(current_root, filename))
+    return sorted(paths)
+
+
+class MetaDatasetFolder(data.Dataset):
+    """Small image-folder view over the locally prepared Meta-Dataset subsets."""
+
+    def __init__(
+        self,
+        root: str = META_DATASET_DEFAULT_ROOT,
+        dataset_name: str = "Meta-CIFAR100",
+        split: str = "test",
+        transform=None,
+    ):
+        self.root = root
+        self.dataset_key = _meta_dataset_key(dataset_name)
+        if self.dataset_key is None:
+            raise ValueError(f"Unknown Meta-Dataset subset: {dataset_name}")
+        self.split = str(split).lower()
+        self.transform = transform
+        self.data, self.targets = self._load_samples()
+
+    def _split_classes(self, split_name: str) -> Optional[List[str]]:
+        split_path = os.path.join(self.root, "splits", f"{split_name}_splits.json")
+        if not os.path.exists(split_path):
+            return None
+        with open(split_path, "r") as f:
+            splits = json.load(f)
+        classes = splits.get(self.split)
+        if classes is None:
+            raise ValueError(f"Split '{self.split}' is not available in {split_path}")
+        if not classes:
+            raise ValueError(f"Split '{self.split}' is empty for Meta-Dataset subset '{self.dataset_key}'")
+        return list(classes)
+
+    def _dataset_spec(self, name: str) -> Dict[str, object]:
+        spec_path = os.path.join(self.root, "processed_data", name, "dataset_spec.json")
+        with open(spec_path, "r") as f:
+            return json.load(f)
+
+    def _load_class_folders(
+        self,
+        base_dir: str,
+        class_dirs: Sequence[Tuple[str, str]],
+    ) -> Tuple[List[str], List[int]]:
+        data = []
+        targets = []
+        for class_idx, (dir_name, _) in enumerate(class_dirs):
+            class_dir = os.path.join(base_dir, dir_name)
+            if not os.path.isdir(class_dir):
+                raise FileNotFoundError(f"Missing Meta-Dataset class folder: {class_dir}")
+            image_paths = _iter_image_files(class_dir)
+            if not image_paths:
+                raise ValueError(f"No images found in Meta-Dataset class folder: {class_dir}")
+            data.extend(image_paths)
+            targets.extend([class_idx] * len(image_paths))
+        return data, targets
+
+    def _load_regular_folder_subset(self, name: str) -> Tuple[List[str], List[int]]:
+        classes = self._split_classes(name)
+        base_dir = os.path.join(self.root, "data", name)
+        class_dirs = [(class_name, class_name) for class_name in classes]
+        return self._load_class_folders(base_dir, class_dirs)
+
+    def _load_traffic_sign(self) -> Tuple[List[str], List[int]]:
+        classes = self._split_classes("traffic_sign")
+        spec = self._dataset_spec("traffic_sign")
+        name_to_id = {class_name: int(class_id) for class_id, class_name in spec["class_names"].items()}
+        base_dir = os.path.join(self.root, "data", "GTSRB", "Final_Training", "Images")
+        class_dirs = [(f"{name_to_id[class_name]:05d}", class_name) for class_name in classes]
+        return self._load_class_folders(base_dir, class_dirs)
+
+    def _load_omniglot(self) -> Tuple[List[str], List[int]]:
+        base_dir = os.path.join(self.root, "data", "omniglot", "images_evaluation")
+        class_dirs = []
+        for alphabet in sorted(os.listdir(base_dir)):
+            alphabet_dir = os.path.join(base_dir, alphabet)
+            if not os.path.isdir(alphabet_dir):
+                continue
+            for character in sorted(os.listdir(alphabet_dir)):
+                character_dir = os.path.join(alphabet_dir, character)
+                if os.path.isdir(character_dir):
+                    class_dirs.append((os.path.join(alphabet, character), f"{alphabet}/{character}"))
+        if not class_dirs:
+            raise ValueError(f"No Omniglot classes found under {base_dir}")
+        return self._load_class_folders(base_dir, class_dirs)
+
+    def _load_mscoco(self) -> Tuple[List[str], List[int]]:
+        classes = self._split_classes("mscoco")
+        annotation_path = os.path.join(self.root, "data", "mscoco", "annotations", "instances_train2017.json")
+        image_root = os.path.join(self.root, "data", "mscoco", "train2017")
+        with open(annotation_path, "r") as f:
+            coco = json.load(f)
+
+        category_names = {cat["id"]: cat["name"] for cat in coco["categories"]}
+        target_categories = {cat_id for cat_id, name in category_names.items() if name in set(classes)}
+        image_names = {image["id"]: image["file_name"] for image in coco["images"]}
+        by_category = {cat_id: set() for cat_id in target_categories}
+        for ann in coco["annotations"]:
+            cat_id = ann["category_id"]
+            if cat_id in by_category:
+                by_category[cat_id].add(image_names[ann["image_id"]])
+
+        data = []
+        targets = []
+        ordered_categories = [cat_id for cat_id, name in sorted(category_names.items(), key=lambda item: item[1]) if cat_id in target_categories]
+        for class_idx, cat_id in enumerate(ordered_categories):
+            image_files = sorted(by_category[cat_id])
+            if not image_files:
+                raise ValueError(f"No MSCOCO images found for category '{category_names[cat_id]}'")
+            data.extend(os.path.join(image_root, filename) for filename in image_files)
+            targets.extend([class_idx] * len(image_files))
+        return data, targets
+
+    def _load_samples(self) -> Tuple[List[str], List[int]]:
+        if self.dataset_key in {"cifar10", "cifar100", "mnist"}:
+            return self._load_regular_folder_subset(self.dataset_key)
+        if self.dataset_key == "traffic_sign":
+            return self._load_traffic_sign()
+        if self.dataset_key == "omniglot":
+            return self._load_omniglot()
+        if self.dataset_key == "mscoco":
+            return self._load_mscoco()
+        raise ValueError(f"Unsupported Meta-Dataset subset: {self.dataset_key}")
+
+    def __getitem__(self, index):
+        image = Image.open(self.data[index]).convert("RGB")
+        if self.transform is not None:
+            image = self.transform(image)
+        return image, self.targets[index]
 
     def __len__(self):
         return len(self.data)
@@ -1039,7 +1231,7 @@ class OTNet(FewShotClassifier):
 # Dataset‑specific transforms
 # ----------------------------
 def build_ds_transforms(image_size: int) -> Dict[str, T.Compose]:
-    return {
+    transforms_by_dataset = {
         "BCCD_WBC": T.Compose([
             transforms.PILToTensor(),
             transforms.Lambda(lambda x: x.float() / 255.0),
@@ -1088,7 +1280,14 @@ def build_ds_transforms(image_size: int) -> Dict[str, T.Compose]:
             transforms.Resize((image_size, image_size)),
             T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ]),
+        "Meta-Dataset": T.Compose([
+            transforms.PILToTensor(),
+            transforms.Lambda(lambda x: x.float() / 255.0),
+            transforms.Resize((image_size, image_size)),
+            T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ]),
     }
+    return transforms_by_dataset
 
 
 # ----------------------------
@@ -1189,7 +1388,7 @@ def main():
     # W&B logging controls
     parser.add_argument('--use_wandb', type=lambda x: str(x).lower() in ['true', '1', 'yes'],
                         default=True, help="Enable/disable Weights & Biases logging")
-    parser.add_argument('--wandb_project', type=str, default='FewShotOT', help='W&B project name')
+    parser.add_argument('--wandb_project', type=str, default='MET', help='W&B project name')
     parser.add_argument('--wandb_entity', type=str, default="leathead_AQ_AM_IO", help='W&B entity (team/user)')
     parser.add_argument('--wandb_offline', type=lambda x: str(x).lower() in ['true', '1', 'yes'],
                         default=False, help='Run W&B in offline mode')
@@ -1202,6 +1401,25 @@ def main():
                         help='Path to miniImageNet JSON filelist (val.json). Used if --mini_imagenet_root is not set.')
     parser.add_argument('--tiered_imagenet_root', type=str, default='',
                         help='Path to tieredImageNet split folder. Falls back to /home_old/.../val.')
+    parser.add_argument(
+        '--meta_dataset_root',
+        type=str,
+        default=DEFAULT_META_DATASET_CODE_ROOT,
+        help='Path to the Meta-Dataset code checkout.',
+    )
+    parser.add_argument(
+        '--meta_records_root',
+        type=str,
+        default=DEFAULT_META_DATASET_RECORDS_ROOT,
+        help='Path to converted Meta-Dataset records.',
+    )
+    parser.add_argument(
+        '--md_test_type',
+        type=str,
+        default='standard',
+        choices=META_DATASET_TEST_TYPES,
+        help='Official Meta-Dataset test protocol.',
+    )
     parser.add_argument('--note', type=str, default="")
     parser.add_argument('--seed', type=int, default=SEED, help="Random seed for reproducibility")
 
@@ -1214,6 +1432,9 @@ def main():
         help="Episode calibration method. Per AGENT.md, only Sinkhorn calibration is exposed.",
     )
     args = parser.parse_args()
+    is_meta_dataset = is_official_meta_dataset_name(args.dataset)
+    if is_meta_dataset:
+        args.dataset = canonicalize_meta_dataset_name(args.dataset)
 
     # Allow seed override from command line
     if args.seed != SEED:
@@ -1232,7 +1453,7 @@ def main():
 
     # Dataset
     if args.use_specific_trans:
-        datatrans = ds_specific_transforms[args.dataset]
+        datatrans = ds_specific_transforms[_dataset_transform_key(args.dataset)]
         print("LOADED DATASET-SPECIFIC TRANSFORMS")
     else:
         datatrans = datatrans_default
@@ -1242,42 +1463,46 @@ def main():
     if stats is not None:
         pixel_mean, pixel_std = stats
 
-    if args.dataset == "CUB":
+    test_loader = None
+    if is_meta_dataset:
+        test_set = None
+    elif args.dataset == "CUB":
         test_set = CUB(split="test", training=False, transform=datatrans)
     elif args.dataset == "Plant-Disease":
-        test_set = FastWrapFewShotDataset(MyDataSet('/home/ahmedm04/projects/distill_part_whole/datasets/Plant-Disease/Plant-Disease', transform=datatrans))
+        test_set = FastWrapFewShotDataset(MyDataSet('/home_old/ahmedm04/few_shot_ds/Plant-Disease/Plant-Disease', transform=datatrans))
     elif args.dataset == "BCCD_WBC":
-        test_set = FastWrapFewShotDataset(MyDataSet('/home/ahmedm04/projects/distill_part_whole/datasets/BCCD_WBC/BCCD_WBC', transform=datatrans))
+        test_set = FastWrapFewShotDataset(MyDataSet('/home_old/ahmedm04/few_shot_ds/BCCD_WBC/BCCD_WBC', transform=datatrans))
     elif args.dataset == "ChestX":
-        test_set = FastWrapFewShotDataset(ChestX('/home/ahmedm04/projects/DINOSEG/datasets/ChestX', transform=datatrans))
+        test_set = FastWrapFewShotDataset(ChestX('/home_old/ahmedm04/few_shot_ds/ChestX', transform=datatrans))
     elif args.dataset == "ISIC":
-        test_set = FastWrapFewShotDataset(ISICDataset('/home/ahmedm04/projects/DINOSEG/datasets/ISIC2018', transform=datatrans))
+        test_set = FastWrapFewShotDataset(ISICDataset('/home_old/ahmedm04/few_shot_ds/ISIC2018', transform=datatrans))
     elif args.dataset == "EUROSAT":
-        test_set = FastWrapFewShotDataset(MyDataSet('/home/ahmedm04/projects/distill_part_whole/datasets/EUROSAT/EUROSAT', transform=datatrans))
+        test_set = FastWrapFewShotDataset(MyDataSet('/home_old/ahmedm04/few_shot_ds/EUROSAT/EUROSAT', transform=datatrans))
     elif args.dataset == "HEp":
-        test_set = FastWrapFewShotDataset(MyDataSet('/home/ahmedm04/projects/distill_part_whole/datasets/HEp-Dataset/HEp-Dataset', transform=datatrans))
+        test_set = FastWrapFewShotDataset(MyDataSet('/home_old/ahmedm04/few_shot_ds/HEp-Dataset/HEp-Dataset', transform=datatrans))
     elif args.dataset == "miniImageNet":
         # Prefer folder structure (same as tieredImageNet); fall back to JSON filelist.
-        _mini_root = args.mini_imagenet_root or "/home_old/ahmedm04/mini-imagenet-tools/mini_imagenet_split/val"
+        _mini_root = args.mini_imagenet_root or "/home_old/ahmedm04/few_shot_ds/mini-imagenet-tools/mini_imagenet_split/val"
         test_set = FastWrapFewShotDataset(MyDataSet(_mini_root, transform=datatrans))
     elif args.dataset == "tieredImageNet":
         _tiered_root = args.tiered_imagenet_root or (
-            "/home_old/ahmedm04/tiered-imagenet-tools/tiered_imagenet/val"
+            "/home_old/ahmedm04/few_shot_ds/tiered-imagenet-tools/tiered_imagenet/val"
         )
         test_set = FastWrapFewShotDataset(MyDataSet(_tiered_root, transform=datatrans))
     else:
         raise ValueError(f"Unknown dataset: {args.dataset}")
 
-    test_sampler = TaskSampler(
-        test_set, n_way=args.n_way, n_shot=args.n_shot, n_query=args.n_query, n_tasks=args.n_test_tasks
-    )
-    test_loader = DataLoader(
-        test_set,
-        batch_sampler=test_sampler,
-        num_workers=args.n_workers,
-        pin_memory=True,
-        collate_fn=test_sampler.episodic_collate_fn,
-    )
+    if test_set is not None:
+        test_sampler = TaskSampler(
+            test_set, n_way=args.n_way, n_shot=args.n_shot, n_query=args.n_query, n_tasks=args.n_test_tasks
+        )
+        test_loader = DataLoader(
+            test_set,
+            batch_sampler=test_sampler,
+            num_workers=args.n_workers,
+            pin_memory=True,
+            collate_fn=test_sampler.episodic_collate_fn,
+        )
 
     # Model
     # Calibration decision
@@ -1311,7 +1536,8 @@ def main():
     clf.n_query = args.n_query  # needed only for calibration assertion
 
     # Init WandB
-    tags = [t for t in [args.dataset, args.backbone, f"{args.n_way}way{args.n_shot}shot"] if t]
+    episode_tag = args.md_test_type if is_meta_dataset else f"{args.n_way}way{args.n_shot}shot"
+    tags = [t for t in [args.dataset, args.backbone, episode_tag] if t]
     if args.wandb_tags:
         tags.extend([t.strip() for t in args.wandb_tags.split(',') if t.strip()])
     run_name = args.wandb_name or (
@@ -1340,6 +1566,9 @@ def main():
         'tiny_whole_mass': 1e-4,
         'device': DEVICE,
         'max_patches': args.max_patches,
+        'meta_dataset_root': args.meta_dataset_root,
+        'meta_records_root': args.meta_records_root,
+        'md_test_type': args.md_test_type,
         # Calibration + transductive
         'calibrate_episode': calibrate_episode,
         'transductive': args.transductive,
@@ -1368,12 +1597,30 @@ def main():
         wb.log_config(wandb_config)
 
     # Evaluate
-    acc = evaluate(clf, test_loader, device=DEVICE)
+    if is_meta_dataset:
+        acc, acc_ci = evaluate_meta_dataset_episodes(
+            model=clf,
+            dataset_name=args.dataset,
+            transform=datatrans,
+            n_test_tasks=args.n_test_tasks,
+            device=DEVICE,
+            meta_dataset_root=args.meta_dataset_root,
+            meta_records_root=args.meta_records_root,
+            md_test_type=args.md_test_type,
+        )
+    else:
+        acc = evaluate(clf, test_loader, device=DEVICE)
+        acc_ci = None
     print(f"Average accuracy : {(100.0 * acc):.2f} %")
-    wb.log({'avg_accuracy': float(acc), 'avg_accuracy_pct': float(round(100.0 * acc, 2))})
+    log_payload = {'avg_accuracy': float(acc), 'avg_accuracy_pct': float(round(100.0 * acc, 2))}
+    if acc_ci is not None:
+        log_payload['avg_accuracy_ci'] = float(acc_ci)
+        log_payload['avg_accuracy_ci_pct'] = float(round(100.0 * acc_ci, 2))
+    wb.log(log_payload)
     wb.log_summary({
         'avg_accuracy': float(round(acc, 2)),
-        'avg_accuracy_pct': float(round(100.0 * acc, 2))
+        'avg_accuracy_pct': float(round(100.0 * acc, 2)),
+        'avg_accuracy_ci': None if acc_ci is None else float(acc_ci),
     })
 
     with open("logs.txt", "a+") as f:
@@ -1387,7 +1634,7 @@ def main():
             f"use_superpixels: {args.use_superpixels}, spix_mode: {spix_modes if args.use_superpixels else []}, "
             f"spix_gamma: {args.spix_gamma}, spix_n_segments: {args.spix_n_segments}, "
             f"spix_compactness: {args.spix_compactness}, spix_mass_mode: {args.spix_mass_mode}, "
-            f"transductive: {args.transductive}, "
+            f"transductive: {args.transductive}, md_test_type: {args.md_test_type}, "
             f"Accuracy: {acc:.6f}, Note: {args.note}\n"
         )
 

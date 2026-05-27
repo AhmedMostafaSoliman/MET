@@ -37,7 +37,7 @@ parameters:
   wandb_entity:
     value: leathead_AQ_AM_IO
   mini_imagenet_root:
-    value: /home_old/ahmedm04/mini-imagenet-tools/mini_imagenet_split/val
+    value: /home_old/ahmedm04/few_shot_ds/mini-imagenet-tools/mini_imagenet_split/val
   note:
     value: sweep_miniImageNet_val
 
